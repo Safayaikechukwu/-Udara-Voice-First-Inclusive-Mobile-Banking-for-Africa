@@ -5,6 +5,8 @@ import os
 import websockets
 from dotenv import load_dotenv
 
+from banking_functions import FUNCTION_MAP
+
 load_dotenv()
 
 def sts_connect():
@@ -23,12 +25,64 @@ def sts_connect():
 def load_config():
     with open("config.json", "r") as f:
         return json.load(f)
+
+#Barge-in handler, if deepgram detects that the user has interrupted the agent, it will send a clear event to twilio
+async def handle_barge_in(decoded, twilio_ws, streamsid):
+    if decoded["type"] == "UsertStartedSpeaking":
+        clear_message = {
+            "event": "clear",
+            "streamSid": streamsid
+        }
+        await twilio_ws.send(json.dumps(clear_message))
+
+def execute_function_call(func_name, arguments):
+    if func_name in FUNCTION_MAP:
+        result = FUNCTION_MAP[func_name](**arguments)
+        print(f"Function '{func_name}' executed with result: {result}")
+        return result
+    else:
+        result = {"error": f"Function '{func_name}' not found."}
+        print(result)
+        return result
     
-async def handdle_barge_in(decoded, twilio_ws, streamsid):
-    pass
+def create_function_call_response(func_id, func_name, result):
+    return {
+        "type": "FunctionCallResponse",
+        "id": func_id,
+        "name": func_name,
+        "content": json.dumps(result)
+    }
+
+async def handle_function_call_request(decoded, sts_ws):
+    try:
+        for function_call in decoded["functions"]:
+            func_name = function_call["name"]
+            func_id = function_call["id"]
+            arguments = json.loads(function_call["arguments"])
+
+            print(f"Function Call Request: {func_name} with ID: {func_id} and arguments: {arguments}")
+            
+            result = execute_function_call(func_name, arguments)
+
+            function_result = create_function_call_response(func_id, func_name, result)
+            await sts_ws.send(json.dumps(function_result))
+            print(f"Sent function result: {function_result}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        error_result = create_function_call_response(
+            func_id if 'func_id' in locals() else "unknown",
+            func_name if 'func_name' in locals() else "unknown",
+            result: {"error": f"Function failed with: {str(e)}"}
+        )
+        await sts_ws.send(json.dumps(error_result))
 
 async def handle_text_message(decoded, twilio_ws, sts_ws, streamsid):
-    pass
+    await handle_barge_in(decoded, twilio_ws, streamsid)
+
+    if decoded["type"] == "FunctionCallRequest":
+        await handle_function_call_request(decoded, sts_ws)
+    #TODO: Handle function calling
 
 #Sending the audio data from twilio to deepgram
 async def sts_sender(sts_ws, audio_queue):
